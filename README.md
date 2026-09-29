@@ -1,71 +1,98 @@
 # wimgpt — which model are you talking to?
 
-Estimates which GPT model is actually serving you, by probing its training-data
-cutoff: send a quiz about dated real events, paste the reply back, and get a
-posterior over candidate models and their cutoffs. Static page, no
-build step.
+[中文文档](README.zh-CN.md)
+
+Estimates which model is serving you by probing its training-data cutoff:
+quiz the model about dated real events, paste the reply back, get a posterior
+over candidate models.
+
+![Example output](assets/panel.png)
+
 
 ## Use
 
-1. Open `index.html` over http — locally `python3 -m http.server`, or push the
-   repo to GitHub and enable Pages on the root.
+1. Open `index.html`
 2. Copy the quiz, send it in a fresh ChatGPT chat with search disabled.
 3. Paste the reply, hit Analyze. (Load sample → Analyze for a demo.)
 
 ## How it works
 
-Quiz of `n` dated events `q_1..q_n` (event date `d_i`), candidates `m_1..m_M`
-with training cutoff `c_j` and prior `π_j`. Reply `r_i ∈ {0,1}`: knows the event.
+### Setup
 
-Likelihood — answers conditionally independent given the model. One global
-pair of constants, no per-question tuning:
+A quiz of $n$ dated events $q_1,\dots,q_n$ with event dates $d_1 \le \dots \le d_n$;
+candidate models $m_1,\dots,m_M$ with training-data cutoffs $c_1,\dots,c_M$ and
+priors $\pi_j = P(m_j)$, $\sum_j \pi_j = 1$ (uniform by default). Each reply
+$r_i \in \{0,1\}$: 1 = knows the event.
 
-```
-P(r_i = 1 | m_j) = p      if d_i <= c_j     (in window, p = 0.9)
-                   eps    if d_i >  c_j     (past cutoff, eps = 0.05)
-```
+### Likelihood model
 
-`eps > 0` so a single lucky guess or refusal can't zero out a hypothesis;
-`p < 1` because in-window events can still fail recall. Guessability is
-handled by curation, not by parameters: the bank admits only unguessable
-specifics, and the uniform `eps = 0.05` absorbs residual guessing. With
-`n_j, K_j, G_j` = questions before cutoff / correct before / "correct" after,
-the likelihood collapses to
+$$P(r_i = 1 \mid m_j) = \begin{cases} p, & d_i \le c_j \\[2pt] \varepsilon, & d_i > c_j \end{cases}$$
 
-```
-L_j = p^K_j (1-p)^(n_j-K_j) · eps^G_j (1-eps)^(n-n_j-G_j)
-```
+with $p = 0.9$ (in-window events can fail recall) and $\varepsilon = 0.05$
+(post-cutoff events can be guessed or hallucinated; with $\varepsilon = 0$ a
+single hit past a candidate's cutoff would zero its likelihood, and a hit past
+every candidate's cutoff would zero all of them).
 
-Posterior is a softmax of `log π_j + log L_j` (uniform priors by default).
-Output: per-model posterior, per-cutoff-band posterior, MAP, posterior
-entropy, and a canary check (fabricated events — claiming to know one flags
-hallucination).
+$$L_j = P(r_{1:n} \mid m_j) = \prod_{i=1}^{n} P(r_i \mid m_j)$$
 
-Missing answers (item skipped, JSON truncated, parse failure) are **omitted
-from the likelihood**, never scored 0 — scoring them 0 would systematically
-bias toward older cutoffs. Fewer than 60% of questions answered invalidates
-the run.
+### Sufficient statistics
 
-A single boundary question is worth `log(p/eps) ≈ 2.9` nats if answered
-correctly and `log((1-eps)/(1-p)) ≈ 2.25` nats against if not — so put 2–3
-questions in each gap between candidate cutoffs.
+$$n_j = \#\{i : d_i \le c_j\}, \qquad K_j = \sum_{d_i \le c_j} r_i, \qquad G_j = \sum_{d_i > c_j} r_i$$
 
-The model is asked to reply in JSON (`knows` 0/1 self-report); if it doesn't,
-numbered lines are parsed and graded by keyword match; missing = omitted.
+$$L_j = p^{K_j}\,(1-p)^{\,n_j - K_j}\;\cdot\;\varepsilon^{G_j}\,(1-\varepsilon)^{\,n - n_j - G_j}$$
+
+The answer vector enters only through $(n_j, K_j, G_j)$: the test estimates a
+change point — where the date-sorted answer sequence flips from 1s to 0s.
+
+### Posterior
+
+$$P(m_j \mid r) = \frac{\pi_j\, L_j}{\sum_{j'=1}^{M} \pi_{j'}\, L_{j'}}, \qquad \log \frac{P(m_a \mid r)}{P(m_b \mid r)} = \log \frac{\pi_a}{\pi_b} + \log \frac{L_a}{L_b}$$
+
+- Uniform priors ⇒ posterior ∝ likelihood.
+- Same cutoff ⇒ identical likelihood for every answer pattern; the posterior
+  ratio equals the prior ratio (50/50 under uniform priors).
+
+### Evidence per boundary question
+
+A question with $c_a < d_i \le c_b$ contributes to the log-odds between $b$ and $a$:
+
+$$r_i = 1:\ \ \log\frac{p}{\varepsilon} \approx 2.89 \text{ nats} \quad (\approx 18\times)$$
+
+$$r_i = 0:\ \ \log\frac{1-\varepsilon}{1-p} \approx 2.25 \text{ nats toward } a \quad (\approx 9.5\times)$$
+
+Single questions can misfire (10% in-window miss rate), so each gap between
+candidate cutoffs carries 2–3 questions.
+
+### Worked example
+
+Two candidates: $A$ (cutoff before $d_2$), $B$ (after). Both questions are in
+$B$'s window, only $q_1$ in $A$'s. Reply $r = (1, 0)$:
+
+$$L_A = 0.9 \cdot 0.95 = 0.855 \qquad L_B = 0.9 \cdot 0.10 = 0.09$$
+
+- Uniform prior: $P(A \mid r) = 0.855 / (0.855 + 0.09) = 90.5\%$
+
+### Missing answers
+
+Omitted from the likelihood (scoring them 0 would bias toward older cutoffs).
+Fewer than 60% of questions answered invalidates the run.
+
+### Outputs
+
+Per-model posterior; per-cutoff-band posterior; MAP; posterior entropy
+$H = -\sum_j P_j \log P_j$; canary check (fabricated events — claiming to know
+one flags hallucination). Non-JSON replies are parsed as numbered lines and
+graded by keyword match.
 
 ## Data files
 
-`questions.json` — dated events; no p/eps fields (one global pair of
-constants in the code). Rules: place events in the gaps between candidate
-cutoffs (the bank covers every gap from 2023-10 through the GPT-6 family);
-**only unguessable specifics** — if the answer can be guessed from pre-event
-knowledge (poll leaders, famous sites, ailing leaders, likely winners), drop
-or rephrase the question; keep the two canaries fabricated and rotate them
-periodically; a public quiz eventually enters training data, so keep your
-bank private.
+`questions.json` — dated events (`id`, `date`, `question`, `truth`, `keywords`,
+optional `canary`). Place events in the gaps between candidate cutoffs; use
+only unguessable specifics — if the answer is guessable from pre-event
+knowledge, drop or rephrase the question.
 
-`models.json` — candidate profiles. Cutoffs as of 2026-09 (partly third-party
-reporting; verify against developers.openai.com):
+`models.json` — candidates (`id`, `cutoff`); priors default to uniform.
+Cutoffs as of 2026-09 (partly third-party; verify against developers.openai.com):
 
 | model | cutoff |
 |---|---|
@@ -80,38 +107,17 @@ reporting; verify against developers.openai.com):
 | gpt-4.1 / o3 | 2024-06-01 |
 | gpt-4o / 4o-mini | 2023-10-01 |
 
-Priors: uniform across all models (omit the `prior` field in `models.json`).
-The inference is pure identification — "which of the candidates is serving
-me, given the answers" — and does not use what you selected in the product
-UI. Compare the posterior to what you requested afterwards, as interpretation,
-not as an input. If you ever have measured routing statistics P(served |
-requested), plug them in as priors; until then uniform is the honest default.
-
-Reading the output honestly: the test measures the **cutoff**, not the model.
-Per-model posteriors and per-band posteriors are the measured quantities;
-candidates sharing a cutoff always split uniformly (e.g. 5.5-pro vs 5.5-mini
-is 50/50, unmeasured by any answer pattern). Whether a given band counts as
-a downgrade for you is interpretation you do with the posterior, outside the
-tool — which is why there is no "trash/downgrade" flag in the data files.
-
 ## Limitations
 
-- Measures the cutoff, not the model: same-cutoff candidates are only
-  separated by priors (see the decomposition note above).
-- `p`/`eps` are single global constants (0.9 / 0.05), and evidence strength
-  scales with `p/eps` — if residual guessability in the bank exceeds what
-  eps=0.05 absorbs, per-hit Bayes factors are overstated. Sanity-check
-  conclusions by tripling eps (×3 moves each hit ~1.1 nats); if the MAP band
-  flips, the run was never decisive. Canary hits give an empirical read on
-  fabrication rate.
-- Web search destroys the test (all-knowing pattern collapses onto the newest
-  cutoff). Use a fresh chat with search off; canary hits are the strongest
-  "it's making things up" signal.
-- Self-reported `knows` can be overconfident; canary hits quantify that.
-- Asking all questions in one conversation slightly leaks context between
-  items.
-- Refusals depress `p` (biased toward older models); keep phrasing neutral.
-- Cutoffs change silently; re-verify the table occasionally.
+- Measures the cutoff; same-cutoff candidates are never separated.
+- Global $p$/$\varepsilon$: if residual guessability exceeds $\varepsilon=0.05$,
+  per-hit Bayes factors are overstated — re-run with $\varepsilon \times 3$ to
+  check robustness.
+- Web search collapses the test onto the newest cutoff; use a fresh chat with
+  search off. Self-report can be suppressed by the web system prompt — verify
+  surprising results with free-recall questions.
+- One conversation leaks slight context between items; refusals depress $p$.
+- Cutoffs change silently.
 
 ## Sources
 

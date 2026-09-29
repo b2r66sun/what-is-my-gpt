@@ -256,7 +256,7 @@ if (typeof document !== "undefined") {
     return { answers, rows, mode };
   }
 
-  function renderBars(container, items, fmt) {
+  function renderBars(container, items) {
     container.innerHTML = "";
     const max = Math.max.apply(null, items.map((x) => x.value).concat([1e-9]));
     for (const it of items) {
@@ -265,6 +265,8 @@ if (typeof document !== "undefined") {
       const label = document.createElement("div");
       label.className = "bar-label";
       label.textContent = it.label;
+      const main = document.createElement("div");
+      main.className = "bar-main";
       const track = document.createElement("div");
       track.className = "bar-track";
       const fill = document.createElement("div");
@@ -272,11 +274,18 @@ if (typeof document !== "undefined") {
       fill.style.width = (100 * it.value / max) + "%";
       const val = document.createElement("span");
       val.className = "bar-val";
-      val.textContent = fmt(it);
+      val.textContent = it.valText;
       track.appendChild(fill);
       track.appendChild(val);
+      main.appendChild(track);
+      if (it.metaText) {
+        const meta = document.createElement("div");
+        meta.className = "bar-meta";
+        meta.textContent = it.metaText;
+        main.appendChild(meta);
+      }
       row.appendChild(label);
-      row.appendChild(track);
+      row.appendChild(main);
       container.appendChild(row);
     }
   }
@@ -298,13 +307,16 @@ if (typeof document !== "undefined") {
     } else { can.parentElement.style.display = "none"; }
 
     renderBars($("model-bars"), inf.evidences.map((e) => ({
-      label: e.model.id, value: e.post, meta: e,
-    })), (it) => pct(it.value) + " · cutoff " + it.meta.model.cutoff +
-        " · in " + it.meta.kb + "/" + it.meta.nb + " · post " + it.meta.ga + "/" + it.meta.na);
+      label: e.model.id, value: e.post, valText: pct(e.post),
+      metaText: "cutoff " + e.model.cutoff +
+          " · in " + e.kb + "/" + e.nb + " · post " + e.ga + "/" + e.na,
+    })));
 
     const cuts = Object.entries(inf.byCutoff).sort((a, b) => b[1].prob - a[1].prob);
-    renderBars($("cutoff-bars"), cuts.map(([k, v]) => ({ label: k, value: v.prob })),
-      (it) => pct(it.value));
+    renderBars($("cutoff-bars"), cuts.map(([k, v]) => ({
+      label: k, value: v.prob, valText: pct(v.prob),
+      metaText: v.count > 1 ? v.count + " candidates" : "",
+    })));
 
     const tb = $("detail");
     tb.innerHTML = "";

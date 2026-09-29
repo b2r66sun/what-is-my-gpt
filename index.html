@@ -30,14 +30,17 @@
   .chip b { font-size:1.05rem; }
   .chip.good { background:#d1fae5; color:#065f46; }
   .chip.bad { background:#fee2e2; color:#991b1b; }
-  .bar-row { display:flex; align-items:center; gap:10px; margin:6px 0; }
-  .bar-label { width:150px; font-size:.85rem; text-align:right; flex-shrink:0;
-               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .bar-track { position:relative; flex:1; background:#eef2f7; border-radius:6px; height:22px; min-width:200px;
+  .bar-row { display:flex; align-items:flex-start; gap:10px; margin:8px 0; }
+  .bar-label { width:140px; font-size:.85rem; text-align:right; flex-shrink:0;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-top:3px; }
+  .bar-main { flex:1; min-width:0; }
+  .bar-track { position:relative; background:#eef2f7; border-radius:6px; height:22px;
                display:flex; align-items:center; }
   .bar-fill { position:absolute; left:0; top:0; bottom:0; background:var(--blue); border-radius:6px;
               transition:width .4s; }
   .bar-val { position:relative; margin-left:auto; font-size:.78rem; color:var(--sub); padding:0 8px; white-space:nowrap; }
+  .bar-meta { font-size:.72rem; color:var(--sub); margin-top:2px;
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   table { border-collapse:collapse; width:100%; font-size:.85rem; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
   details { margin-top:12px; }
@@ -47,7 +50,10 @@
   footer .ok { color:var(--green); }
   footer .err { color:var(--red); font-weight:600; }
   a { color:var(--blue); }
-  @media (max-width:640px) { .bar-label { width:96px; } }
+  @media (max-width:640px) {
+    .bar-label { width:88px; font-size:.78rem; }
+    table { display:block; overflow-x:auto; }
+  }
 </style>
 </head>
 <body>
