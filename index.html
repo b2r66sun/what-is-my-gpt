@@ -37,7 +37,6 @@
                display:flex; align-items:center; }
   .bar-fill { position:absolute; left:0; top:0; bottom:0; background:var(--blue); border-radius:6px;
               transition:width .4s; }
-  .bar-fill.bad { background:var(--red); }
   .bar-val { position:relative; margin-left:auto; font-size:.78rem; color:var(--sub); padding:0 8px; white-space:nowrap; }
   table { border-collapse:collapse; width:100%; font-size:.85rem; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
@@ -81,13 +80,12 @@
     <div class="step">RESULTS</div>
     <div class="chips">
       <div class="chip">MAP <b id="map">—</b> <span id="map-prob"></span></div>
-      <div class="chip">Σ trash posterior <b id="downgrade">—</b></div>
       <div class="chip">entropy <b id="entropy">—</b></div>
       <div class="chip">canary <b id="canary">—</b></div>
     </div>
     <h2>Per-model posterior</h2>
     <div id="model-bars"></div>
-    <h2 style="margin-top:18px">By training cutoff <span class="note">— same-cutoff models split by prior, not evidence (trash share shown per band)</span></h2>
+    <h2 style="margin-top:18px">By training cutoff <span class="note">— same-cutoff models split uniformly, not by evidence</span></h2>
     <div id="cutoff-bars"></div>
     <details>
       <summary>Grading details</summary>

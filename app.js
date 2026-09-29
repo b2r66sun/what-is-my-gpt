@@ -119,6 +119,9 @@ function parseReply(text) {
 
 /* ========== Bayesian inference ========== */
 
+const P_DEFAULT = 0.9;    // global: P(knows | event within training window)
+const EPS_DEFAULT = 0.05; // global: P(claims to know | event after cutoff) — lucky-guess rate
+
 function infer(models, questions, answers) {
   // Missing answers (null) carry no information: the likelihood term is omitted
   // entirely, never scored 0. Too many missing => the run is invalid.
@@ -156,7 +159,6 @@ function infer(models, questions, answers) {
   evs.sort((a, b) => b.post - a.post);
 
   const entropy = -evs.reduce((a, e) => a + (e.post > 0 ? e.post * Math.log(e.post) : 0), 0);
-  const downgradeProb = evs.reduce((a, e) => a + (e.model.trash ? e.post : 0), 0);
   const canaryTotal = questions.filter((q, i) => q.canary && answers[i] != null).length;
   const canaryHits = questions.reduce((a, q, i) => a + (q.canary && answers[i] ? 1 : 0), 0);
   const unanswered = questions.filter((q, i) => answers[i] == null).length;
@@ -164,16 +166,11 @@ function infer(models, questions, answers) {
   const byCutoff = {};
   for (const e of evs) {
     const k = e.model.cutoff;
-    if (!byCutoff[k]) byCutoff[k] = { prob: 0, count: 0, trashShare: 0, priorMass: 0, trashMass: 0 };
+    if (!byCutoff[k]) byCutoff[k] = { prob: 0, count: 0 };
     byCutoff[k].prob += e.post;
     byCutoff[k].count += 1;
-    byCutoff[k].priorMass += priors[models.indexOf(e.model)];
-    if (e.model.trash) byCutoff[k].trashMass += priors[models.indexOf(e.model)];
   }
-  for (const k of Object.keys(byCutoff)) {
-    byCutoff[k].trashShare = byCutoff[k].priorMass > 0 ? byCutoff[k].trashMass / byCutoff[k].priorMass : 0;
-  }
-  return { evidences: evs, downgradeProb, entropy, maxEntropy: Math.log(models.length),
+  return { evidences: evs, entropy, maxEntropy: Math.log(models.length),
            canaryHits, canaryTotal, unanswered, byCutoff };
 }
 
@@ -205,8 +202,8 @@ function selfTest() {
   const qd = ["2023-01-05", "2023-06-10", "2024-07-13", "2024-08-01", "2024-09-20", "2025-07-01", "2025-08-15"];
   const qs = qd.map((d, i) => ({ id: "q" + i, date: d, question: "", keywords: [], p: 0.9, eps: 0.03 }));
   const ms = [
-    { id: "old", cutoff: "2024-01-01", prior: 0.5, trash: false },
-    { id: "new", cutoff: "2025-01-01", prior: 0.5, trash: false },
+    { id: "old", cutoff: "2024-01-01", prior: 0.5 },
+    { id: "new", cutoff: "2025-01-01", prior: 0.5 },
   ];
   const inf = infer(ms, qs, [1, 1, 1, 1, 1, 0, 0]);
   results.push(["inference baseline", inf.evidences[0].model.id === "new" &&
@@ -271,7 +268,7 @@ if (typeof document !== "undefined") {
       const track = document.createElement("div");
       track.className = "bar-track";
       const fill = document.createElement("div");
-      fill.className = "bar-fill" + (it.bad ? " bad" : "");
+      fill.className = "bar-fill";
       fill.style.width = (100 * it.value / max) + "%";
       const val = document.createElement("span");
       val.className = "bar-val";
@@ -289,9 +286,6 @@ if (typeof document !== "undefined") {
 
     $("map").textContent = inf.evidences[0].model.id;
     $("map-prob").textContent = pct(inf.evidences[0].post);
-    const dg = $("downgrade");
-    dg.textContent = pct(inf.downgradeProb);
-    dg.className = inf.downgradeProb > 0.5 ? "chip bad" : "chip good";
     const ratio = inf.entropy / inf.maxEntropy;
     const conf = ratio < 0.3 ? "high" : (ratio < 0.7 ? "medium" : "low");
     $("entropy").textContent = inf.entropy.toFixed(2) + " / " + inf.maxEntropy.toFixed(2) + " · " + conf;
@@ -304,14 +298,13 @@ if (typeof document !== "undefined") {
     } else { can.parentElement.style.display = "none"; }
 
     renderBars($("model-bars"), inf.evidences.map((e) => ({
-      label: e.model.id, value: e.post, bad: e.model.trash, meta: e,
+      label: e.model.id, value: e.post, meta: e,
     })), (it) => pct(it.value) + " · cutoff " + it.meta.model.cutoff +
         " · in " + it.meta.kb + "/" + it.meta.nb + " · post " + it.meta.ga + "/" + it.meta.na);
 
     const cuts = Object.entries(inf.byCutoff).sort((a, b) => b[1].prob - a[1].prob);
-    renderBars($("cutoff-bars"), cuts.map(([k, v]) => ({ label: k, value: v.prob, meta: v })),
-      (it) => pct(it.value) + (it.meta.trashShare > 0
-        ? " · trash(prior) " + pct(it.meta.trashShare) : ""));
+    renderBars($("cutoff-bars"), cuts.map(([k, v]) => ({ label: k, value: v.prob })),
+      (it) => pct(it.value));
 
     const tb = $("detail");
     tb.innerHTML = "";
@@ -370,11 +363,11 @@ if (typeof document !== "undefined") {
   function init(bank) {
     QUESTIONS = bank.questions.map((q) => ({
       id: q.id, date: q.date, question: q.question,
-      keywords: q.keywords || [], p: q.p || 0.9, eps: q.eps || 0.03,
-      canary: !!q.canary,
+      keywords: q.keywords || [], canary: !!q.canary,
+      p: q.p || P_DEFAULT, eps: q.eps || EPS_DEFAULT,
     }));
     MODELS = bank.models.map((m) => ({
-      id: m.id, cutoff: m.cutoff, prior: m.prior || 0, trash: !!m.trash,
+      id: m.id, cutoff: m.cutoff, prior: m.prior || 0,
     }));
     lastPrompt = buildPrompt(QUESTIONS);
     $("prompt").textContent = lastPrompt;
