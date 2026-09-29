@@ -34,23 +34,31 @@ L_j = p^K_j (1-p)^(n_j-K_j) · eps^G_j (1-eps)^(n-n_j-G_j)
 ```
 
 Posterior is a softmax of `log π_j + log L_j`. Output: per-model posterior,
-MAP, downgrade probability (sum over `trash` profiles), posterior entropy, and
-a canary check (fabricated events — claiming to know one flags hallucination).
+MAP, Σ trash posterior, posterior entropy, and a canary check (fabricated
+events — claiming to know one flags hallucination).
+
+Missing answers (item skipped, JSON truncated, parse failure) are **omitted
+from the likelihood**, never scored 0 — scoring them 0 would systematically
+bias toward older cutoffs. Fewer than 60% of questions answered invalidates
+the run.
 
 A single boundary question is worth `log(p/eps) ≈ 3.4` nats if answered
 correctly and `log((1-eps)/(1-p)) ≈ 2.3` nats against if not — so put 2–3
 questions in each gap between candidate cutoffs.
 
 The model is asked to reply in JSON (`knows` 0/1 self-report); if it doesn't,
-numbered lines are parsed and graded by keyword match; missing = 0.
+numbered lines are parsed and graded by keyword match; missing = omitted.
 
 ## Data files
 
 `questions.json` — dated events. Rules: place events in the gaps between
-candidate cutoffs; avoid predictable events (eclipses, scheduled election days)
-— anything guessable needs a high `eps`; lower `p` for obscure events; keep the
-two canaries fabricated and rotate them periodically; a public quiz eventually
-enters training data, so keep your bank private.
+candidate cutoffs (the bank now covers every gap from 2023-10 through the
+GPT-6 family, i.e. events after 2026-04-20 and after 2026-05-18); avoid
+predictable events — anything guessable from pre-event knowledge (famous
+names, poll leaders, famous sites like Fordow/Natanz) needs a high `eps`;
+lower `p` for obscure events; keep the two canaries fabricated and rotate
+them periodically; a public quiz eventually enters training data, so keep
+your bank private.
 
 `models.json` — candidate profiles. Cutoffs as of 2026-09 (partly third-party
 reporting; verify against developers.openai.com):
@@ -59,7 +67,8 @@ reporting; verify against developers.openai.com):
 |---|---|
 | gpt-6-astra | 2026-04-30 |
 | gpt-6-sol | 2026-04-20 |
-| gpt-5.6 | 2026-02-28 |
+| gpt-6-luna | 2026-05-18 |
+| gpt-5.6 | 2026-02-16 |
 | gpt-5.5-pro / 5.5-mini | 2025-12-01 |
 | gpt-5.4 / 5.2 | 2025-08-31 |
 | gpt-5 / 5.1 | 2024-09-30 |
@@ -67,11 +76,22 @@ reporting; verify against developers.openai.com):
 | gpt-4.1 / o3 | 2024-06-01 |
 | gpt-4o / 4o-mini | 2023-10-01 |
 
+Reading the output honestly: the test measures the **cutoff**, not the model.
+The Σ trash posterior decomposes as P(band | data) × (trash prior share of
+that band) — the first factor is evidence, the second is your prior. Where a
+band mixes tiers (5.5-pro/mini: 0.05:0.10 → 2/3 trash), that split is
+assumed, not measured. The per-band trash share is printed next to each
+cutoff bar.
+
 ## Limitations
 
-- Measures the cutoff, not the model: candidates sharing a cutoff are only
-  separated by priors (e.g. gpt-5.5-pro vs 5.5-mini caps that band's downgrade
-  probability near 66% under the default priors — an honest floor, not a bug).
+- Measures the cutoff, not the model: same-cutoff candidates are only
+  separated by priors (see the decomposition note above).
+- `p_i`/`eps_i` are hand-tuned priors, and evidence strength scales with
+  `p/eps` — a 10× error in `eps` means a 10× error in per-hit Bayes factors.
+  Sanity-check conclusions by varying `eps` (×3 moves each hit ~1.1 nats);
+  if the MAP band flips, the run was never decisive. Canary hits give an
+  empirical read on fabrication rate.
 - Web search destroys the test (all-knowing pattern collapses onto the newest
   cutoff). Use a fresh chat with search off; canary hits are the strongest
   "it's making things up" signal.

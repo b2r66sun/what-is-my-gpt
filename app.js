@@ -120,6 +120,13 @@ function parseReply(text) {
 /* ========== Bayesian inference ========== */
 
 function infer(models, questions, answers) {
+  // Missing answers (null) carry no information: the likelihood term is omitted
+  // entirely, never scored 0. Too many missing => the run is invalid.
+  const real = questions.filter((q) => !q.canary).length;
+  const answeredReal = questions.filter((q, i) => !q.canary && answers[i] != null).length;
+  if (answeredReal < Math.max(5, Math.ceil(real * 0.6)))
+    throw new Error("Invalid run: only " + answeredReal + "/" + real + " questions answered (need ≥60%) — the reply was likely truncated or unparseable");
+
   const rawPriors = models.map((m) => (m.prior > 0 ? m.prior : 0));
   const tot = rawPriors.reduce((a, b) => a + b, 0);
   const priors = tot > 0 ? rawPriors.map((x) => x / tot) : models.map(() => 1 / models.length);
@@ -127,8 +134,8 @@ function infer(models, questions, answers) {
   const evs = models.map((m, j) => {
     let ll = 0, nb = 0, kb = 0, na = 0, ga = 0;
     questions.forEach((q, i) => {
-      if (q.canary) return;
-      const ri = answers[i] == null ? 0 : answers[i];
+      if (q.canary || answers[i] == null) return;
+      const ri = answers[i];
       if (q.date <= m.cutoff) {           // ISO date strings compare lexicographically
         nb++; kb += ri;
         ll += ri ? Math.log(q.p) : Math.log(1 - q.p);
@@ -150,16 +157,21 @@ function infer(models, questions, answers) {
 
   const entropy = -evs.reduce((a, e) => a + (e.post > 0 ? e.post * Math.log(e.post) : 0), 0);
   const downgradeProb = evs.reduce((a, e) => a + (e.model.trash ? e.post : 0), 0);
-  const canaryTotal = questions.filter((q) => q.canary).length;
+  const canaryTotal = questions.filter((q, i) => q.canary && answers[i] != null).length;
   const canaryHits = questions.reduce((a, q, i) => a + (q.canary && answers[i] ? 1 : 0), 0);
   const unanswered = questions.filter((q, i) => answers[i] == null).length;
 
   const byCutoff = {};
   for (const e of evs) {
     const k = e.model.cutoff;
-    if (!byCutoff[k]) byCutoff[k] = { prob: 0, count: 0 };
+    if (!byCutoff[k]) byCutoff[k] = { prob: 0, count: 0, trashShare: 0, priorMass: 0, trashMass: 0 };
     byCutoff[k].prob += e.post;
     byCutoff[k].count += 1;
+    byCutoff[k].priorMass += priors[models.indexOf(e.model)];
+    if (e.model.trash) byCutoff[k].trashMass += priors[models.indexOf(e.model)];
+  }
+  for (const k of Object.keys(byCutoff)) {
+    byCutoff[k].trashShare = byCutoff[k].priorMass > 0 ? byCutoff[k].trashMass / byCutoff[k].priorMass : 0;
   }
   return { evidences: evs, downgradeProb, entropy, maxEntropy: Math.log(models.length),
            canaryHits, canaryTotal, unanswered, byCutoff };
@@ -203,6 +215,15 @@ function selfTest() {
   const inf2 = infer(ms, qs2, [1, 1, 1, 1, 1, 0, 0, 1]);
   results.push(["canary excluded",
     Math.abs(inf2.evidences[0].post - inf.evidences[0].post) < 1e-12]);
+  const infNull = infer(ms, qs, [1, 1, null, 1, 1, 0, 0]);
+  const infSub = infer(ms, [qs[0], qs[1], qs[3], qs[4], qs[5], qs[6]], [1, 1, 1, 1, 0, 0]);
+  results.push(["missing omitted, not scored 0",
+    Math.abs(infNull.evidences[0].post - infSub.evidences[0].post) < 1e-12 &&
+    infNull.evidences[0].nb === 4 && infSub.evidences[0].nb === 4]);
+  let threw = false;
+  try { infer(ms, qs, [null, null, null, null, null, null, null]); }
+  catch (err) { threw = true; }
+  results.push(["too-few-answered invalid", threw]);
   return results;
 }
 
@@ -288,16 +309,18 @@ if (typeof document !== "undefined") {
         " · in " + it.meta.kb + "/" + it.meta.nb + " · post " + it.meta.ga + "/" + it.meta.na);
 
     const cuts = Object.entries(inf.byCutoff).sort((a, b) => b[1].prob - a[1].prob);
-    renderBars($("cutoff-bars"), cuts.map(([k, v]) => ({ label: k, value: v.prob })),
-      (it) => pct(it.value));
+    renderBars($("cutoff-bars"), cuts.map(([k, v]) => ({ label: k, value: v.prob, meta: v })),
+      (it) => pct(it.value) + (it.meta.trashShare > 0
+        ? " · trash(prior) " + pct(it.meta.trashShare) : ""));
 
     const tb = $("detail");
     tb.innerHTML = "";
     for (const row of rows) {
       const tr = document.createElement("tr");
-      const tag = row.q.canary
-        ? (row.r ? "fabricated!" : "denied")
-        : (row.r ? "knows" : "doesn't know");
+      let tag;
+      if (row.r === null) tag = "omitted";
+      else if (row.q.canary) tag = row.r ? "fabricated!" : "denied";
+      else tag = row.r ? "knows" : "doesn't know";
       let cross = "";
       if (row.src === "self" && row.r && row.show && row.q.keywords &&
           !gradeAnswer(row.show, row.q.keywords)) cross = " ⚠ keywords missed";
@@ -307,7 +330,7 @@ if (typeof document !== "undefined") {
       tb.appendChild(tr);
     }
     let modeNote = "parse: " + mode;
-    if (inf.unanswered) modeNote += " · " + inf.unanswered + " unanswered (counted as 0)";
+    if (inf.unanswered) modeNote += " · " + inf.unanswered + " unanswered → omitted from likelihood";
     $("mode-note").textContent = modeNote;
     $("results").style.display = "";
     $("results").scrollIntoView({ behavior: "smooth" });
