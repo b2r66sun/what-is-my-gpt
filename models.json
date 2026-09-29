@@ -1,0 +1,20 @@
+{
+  "_readme": "OpenAI lineup as of 2026-09. cutoff: training-data cutoff (partly third-party, verify against developers.openai.com). prior: prior probability (here biased toward 'you asked for astra'). trash: counts toward downgrade probability. Candidates sharing a cutoff are indistinguishable by this test (posterior ratio = prior ratio).",
+  "models": [
+    {"id": "gpt-6-astra", "cutoff": "2026-04-30", "prior": 0.30, "trash": false, "note": "flagship, released 2026-09-03"},
+    {"id": "gpt-6-sol", "cutoff": "2026-04-20", "prior": 0.08, "trash": false, "note": "cutoff also reported as 2026-05-18"},
+    {"id": "gpt-5.6", "cutoff": "2026-02-28", "prior": 0.12, "trash": false, "note": "Sol/Terra/Luna variants"},
+    {"id": "gpt-5.5-pro", "cutoff": "2025-12-01", "prior": 0.05, "trash": false},
+    {"id": "gpt-5.5-mini", "cutoff": "2025-12-01", "prior": 0.10, "trash": true, "note": "reported downgrade target"},
+    {"id": "gpt-5.4", "cutoff": "2025-08-31", "prior": 0.05, "trash": false},
+    {"id": "gpt-5.2", "cutoff": "2025-08-31", "prior": 0.05, "trash": false},
+    {"id": "gpt-5.1", "cutoff": "2024-09-30", "prior": 0.05, "trash": false},
+    {"id": "gpt-5", "cutoff": "2024-09-30", "prior": 0.05, "trash": false},
+    {"id": "gpt-5-mini", "cutoff": "2024-05-31", "prior": 0.05, "trash": true},
+    {"id": "gpt-5-nano", "cutoff": "2024-05-31", "prior": 0.03, "trash": true},
+    {"id": "gpt-4.1", "cutoff": "2024-06-01", "prior": 0.03, "trash": false},
+    {"id": "o3", "cutoff": "2024-06-01", "prior": 0.02, "trash": false},
+    {"id": "gpt-4o", "cutoff": "2023-10-01", "prior": 0.01, "trash": true, "note": "removed from ChatGPT 2026-02-25"},
+    {"id": "gpt-4o-mini", "cutoff": "2023-10-01", "prior": 0.01, "trash": true}
+  ]
+}

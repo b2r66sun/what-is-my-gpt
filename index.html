@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wimgpt — which model are you talking to?</title>
+<style>
+  :root { --fg:#1a1d23; --sub:#5b6472; --line:#e4e7ec; --blue:#3b82f6; --red:#ef4444;
+          --green:#10b981; --bg:#f6f7f9; --card:#fff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+         color:var(--fg); background:var(--bg); line-height:1.6; }
+  .wrap { max-width:880px; margin:0 auto; padding:24px 16px 80px; }
+  header h1 { font-size:1.5rem; margin:8px 0 4px; }
+  header p { color:var(--sub); margin:0 0 8px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:18px 20px; margin:16px 0; }
+  .step { font-size:.8rem; font-weight:600; color:var(--sub); letter-spacing:.05em; }
+  h2 { font-size:1rem; margin:2px 0 10px; }
+  button { background:var(--blue); color:#fff; border:0; border-radius:8px; padding:9px 18px;
+           font-size:.95rem; cursor:pointer; margin:2px 6px 2px 0; }
+  button:hover { filter:brightness(1.08); }
+  button.ghost { background:#eef2f7; color:var(--fg); }
+  pre#prompt { background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px;
+               white-space:pre-wrap; word-break:break-all; font-size:.82rem; max-height:260px; overflow:auto; }
+  textarea { width:100%; min-height:160px; border:1px solid var(--line); border-radius:8px;
+             padding:10px; font-size:.9rem; font-family:inherit; resize:vertical; }
+  .chips { display:flex; flex-wrap:wrap; gap:10px; margin:6px 0 14px; }
+  .chip { background:#eef2f7; border-radius:8px; padding:6px 12px; font-size:.88rem; }
+  .chip b { font-size:1.05rem; }
+  .chip.good { background:#d1fae5; color:#065f46; }
+  .chip.bad { background:#fee2e2; color:#991b1b; }
+  .bar-row { display:flex; align-items:center; gap:10px; margin:6px 0; }
+  .bar-label { width:150px; font-size:.85rem; text-align:right; flex-shrink:0;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar-track { position:relative; flex:1; background:#eef2f7; border-radius:6px; height:22px; min-width:200px;
+               display:flex; align-items:center; }
+  .bar-fill { position:absolute; left:0; top:0; bottom:0; background:var(--blue); border-radius:6px;
+              transition:width .4s; }
+  .bar-fill.bad { background:var(--red); }
+  .bar-val { position:relative; margin-left:auto; font-size:.78rem; color:var(--sub); padding:0 8px; white-space:nowrap; }
+  table { border-collapse:collapse; width:100%; font-size:.85rem; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  details { margin-top:12px; }
+  details summary { cursor:pointer; color:var(--sub); margin:10px 0 6px; }
+  .note { color:var(--sub); font-size:.82rem; }
+  footer { color:var(--sub); font-size:.8rem; margin-top:28px; }
+  footer .ok { color:var(--green); }
+  footer .err { color:var(--red); font-weight:600; }
+  a { color:var(--blue); }
+  @media (max-width:640px) { .bar-label { width:96px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="step">BAYESIAN GPT-ROUTING DETECTOR</div>
+    <h1>wimgpt — which model are you talking to?</h1>
+    <p>Probes the training-data cutoff to estimate which model is serving you.</p>
+  </header>
+
+  <div class="card">
+    <div class="step">STEP 1</div>
+    <h2>Quiz prompt <span class="note" id="q-count"></span></h2>
+    <button id="copy-btn">Copy</button>
+    <pre id="prompt">loading…</pre>
+  </div>
+
+  <div class="card">
+    <div class="step">STEP 2</div>
+    <h2>Model reply</h2>
+    <textarea id="reply" placeholder='{"answers": [{"no": 1, "knows": 1, "what": "…"}, …]}&#10;or numbered lines: 1. …  2. …'></textarea>
+    <p>
+      <button id="analyze-btn">Analyze</button>
+      <button id="sample-btn" class="ghost">Load sample</button>
+      <span class="note" id="mode-note"></span>
+    </p>
+  </div>
+
+  <div class="card" id="results" style="display:none">
+    <div class="step">RESULTS</div>
+    <div class="chips">
+      <div class="chip">MAP <b id="map">—</b> <span id="map-prob"></span></div>
+      <div class="chip">downgrade <b id="downgrade">—</b></div>
+      <div class="chip">entropy <b id="entropy">—</b></div>
+      <div class="chip">canary <b id="canary">—</b></div>
+    </div>
+    <h2>Per-model posterior</h2>
+    <div id="model-bars"></div>
+    <h2 style="margin-top:18px">By training cutoff</h2>
+    <div id="cutoff-bars"></div>
+    <details>
+      <summary>Grading details</summary>
+      <table>
+        <thead><tr><th>#</th><th>date</th><th>verdict (source)</th><th>answer</th></tr></thead>
+        <tbody id="detail"></tbody>
+      </table>
+    </details>
+  </div>
+
+  <footer>
+    <span id="selftest">self-test…</span> · <a href="README.md" target="_blank">README</a>
+  </footer>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
