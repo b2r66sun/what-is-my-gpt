@@ -4,14 +4,20 @@ on:
   push:
     paths: [questions.json, models.json, tools/**, .github/workflows/bank.yml]
   pull_request:
-    paths: [questions.json, models.json, tools/**]
+    paths: [questions.json, models.json, tools/**, .github/workflows/bank.yml]
   schedule:
     - cron: "0 3 * * 1" # Mondays 03:00 UTC
   workflow_dispatch:
     inputs:
-      since:
-        description: "days to scan"
-        default: "14"
+      mode:
+        description: "thin (fill weak gaps) | since (recent days)"
+        type: choice
+        default: thin
+        options: [thin, since]
+      days:
+        description: "days to scan (since mode)"
+        type: number
+        default: 14
 
 permissions:
   contents: write
@@ -35,29 +41,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: |
-          SINCE="${{ github.event.inputs.since || '14' }}"
-          python3 tools/gen_bank.py --context --since "$SINCE" --with-canaries 2 -o raw-context.md
-      # ---- agent step (draft generation) ------------------------------------
-      # Deterministic layer only fetches/flattens: question phrasing,
-      # keyword choice and guessability judgment run as an LLM agent task.
-      # Options to execute tools/agent-task.md on this raw-events.json:
-      #   a) GitHub Agentic Workflows (gh-aw): `gh aw init` scaffolds an agent
-      #      workflow; it runs Copilot/Claude/Codex on Actions runners and
-      #      consumes Copilot premium requests (public repos: compute free).
-      #   b) Any agent CLI with a key in secrets (e.g. ANTHROPIC_API_KEY),
-      #      invoked here to read tools/agent-task.md + raw-events.json and
-      #      write bank-draft.json.
-      # Until wired, the PR below carries raw-context.md for manual drafting.
-      - run: |
+      - id: gen
+        run: |
+          MODE="${{ github.event.inputs.mode || 'thin' }}"
+          SEED="${{ github.run_number }}${{ github.run_attempt }}"
+          if [ "$MODE" = "since" ]; then
+            DAYS="${{ github.event.inputs.days || '14' }}"
+            python3 tools/gen_bank.py --context --since "$DAYS" --seed "$SEED" --with-canaries 2 -o raw-context.md
+          else
+            python3 tools/gen_bank.py --context --thin --seed "$SEED" --with-canaries 2 -o raw-context.md
+          fi
+      # fetch-all-failed => script exits 1 => job fails => no PR
+      - if: always() && steps.gen.outcome == 'success'
+        run: |
           git config user.name "bank-bot"
           git config user.email "actions@github.com"
-          BR="bank-ctx-$(date -u +%Y%m%d)"
+          BR="bank-ctx-$(date -u +%Y%m%d)-r${{ github.run_number }}-${{ github.run_attempt }}"
+          # close stale open bank PRs instead of piling up
+          for pr in $(gh pr list --state open --limit 30 --json number,headRefName \
+                --jq '.[] | select(.headRefName | startswith("bank-ctx-")) | .number'); do
+            gh pr close "$pr" --comment "superseded by a newer bank run"
+          done
           git checkout -b "$BR"
           git add raw-context.md raw-context.canaries.json
           git commit -m "bank context $(date -u +%F)"
           git push origin "HEAD:$BR"
           gh pr create --title "Bank context $(date -u +%F)" \
-            --body "raw-context.md (flattened current events + article summaries). Run the agent task in tools/agent-task.md (gh-aw or any agent CLI) or draft manually, then: python3 tools/gen_bank.py --merge bank-draft.json"
+            --body "raw-context.md (flattened events with gap/RESERVE labels + article summaries; Coverage section lists thin gaps). Run the agent task in tools/agent-task.md (gh-aw or any agent CLI) or draft manually, then: python3 tools/gen_bank.py --merge bank-draft.json"
         env:
           GH_TOKEN: ${{ github.token }}

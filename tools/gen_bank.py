@@ -2,18 +2,20 @@
 """wimgpt bank generator (deterministic layer).
 
 Fetches Wikipedia current-events day pages and flattens them (tag-level, no
-structural parsing) into raw-context.md, with article summaries for
-cross-checks. Entry extraction, question phrasing, keyword choice and
-guessability judgment are the agent's job (tools/agent-task.md).
+structural parsing) into raw-context.md, marking each day with the cutoff gap
+it belongs to (or RESERVE for dates after the newest cutoff), plus article
+summaries (newest-first budget, retried) for date cross-checks. Entry
+extraction, question phrasing, keyword choice and guessability judgment are
+the agent's job (tools/agent-task.md).
 
 Usage:
   python3 tools/gen_bank.py --coverage                  # gap counts, no network
-  python3 tools/gen_bank.py --check                     # validate bank files
+  python3 tools/gen_bank.py --check                     # validate bank + models
   python3 tools/gen_bank.py --context --since 14        # last 14 days -> raw-context.md
   python3 tools/gen_bank.py --context --dates 2026-05-01:2026-05-18
-  python3 tools/gen_bank.py --context --thin            # sample dates in gaps < 3 items
+  python3 tools/gen_bank.py --context --thin            # seeded sampling in gaps < 3 items
   python3 tools/gen_bank.py --context --fixture tools/fixture.html --date 2026-05-03
-  python3 tools/gen_bank.py --canaries 3
+  python3 tools/gen_bank.py --canaries 3                # -> canaries.json
   python3 tools/gen_bank.py --merge bank-draft.json [--bank questions.json]
 """
 
@@ -38,6 +40,17 @@ REST = "https://en.wikipedia.org/api/rest_v1/page/summary/"
 UA = "wimgpt-bank-gen/0.1 (maintenance script)"
 
 LINK_NS_SKIP = ("Category:", "Portal:", "Special:", "Wikipedia:", "File:", "Help:", "Template:")
+# Generic geography pages carry no date-verification value; don't spend the
+# summary budget on them.
+GENERIC_TITLES = {
+    "Ukraine", "Russia", "Kyiv", "Moscow", "Poland", "Germany", "France", "Italy",
+    "Spain", "United Kingdom", "United States", "China", "Japan", "India", "Israel",
+    "Iran", "Gaza Strip", "West Bank", "Lebanon", "Syria", "Turkey", "Egypt", "Iraq",
+    "Saudi Arabia", "Brazil", "Mexico", "Argentina", "Canada", "Australia",
+    "South Korea", "North Korea", "Taiwan", "European Union", "NATO", "United Nations",
+    "Africa", "Europe", "Asia", "Middle East", "London", "Paris", "Berlin", "Tokyo",
+    "Beijing", "Washington, D.C.", "New York City", "Brussels", "Gaza City",
+}
 
 CANARY_TEMPLATES = [
     "{country} announced it would permanently leave the {org}",
@@ -71,13 +84,18 @@ def gaps(models):
     return sorted({m["cutoff"] for m in models})
 
 
-def band_of(d, cuts):
+def gap_label(d, cuts):
+    """(label, note) for a date against candidate cutoffs."""
     prev = ""
     for c in cuts:
         if (prev == "" or d > prev) and d <= c:
-            return f"({prev or 'start'}, {c}]" if prev else f"[start, {c}]"
+            return (f"GAP ({prev or 'start'}, {c}]",
+                    f"events here are known by candidates with cutoff >= {c} and unknown below — "
+                    f"they discriminate the {c} band")
         prev = c
-    return None  # after the newest cutoff: no candidate knows it
+    return ("RESERVE",
+            f"after the newest cutoff ({cuts[-1]}): NO current candidate knows these — "
+            f"do NOT draft items from this section")
 
 
 def coverage(questions, models):
@@ -96,9 +114,18 @@ def check(questions, models):
     errs = []
     ids = [q.get("id") for q in questions]
     if len(ids) != len(set(ids)):
-        errs.append("duplicate ids")
-    canaries = [q for q in questions if q.get("canary")]
-    if not canaries:
+        errs.append("duplicate question ids")
+    if not models:
+        errs.append("models.json empty")
+    mids = [m.get("id") for m in models]
+    if len(mids) != len(set(mids)):
+        errs.append("duplicate model ids")
+    for m in models:
+        try:
+            date.fromisoformat(m.get("cutoff", ""))
+        except ValueError:
+            errs.append(f"bad model cutoff: {m.get('id')}")
+    if not [q for q in questions if q.get("canary")]:
         errs.append("no canary questions")
     keys = [(bool(q.get("canary")), q.get("date", "")) for q in questions]
     if keys != sorted(keys):
@@ -111,6 +138,8 @@ def check(questions, models):
         for field in ("id", "question", "truth", "keywords"):
             if field not in q:
                 errs.append(f"missing {field}: {q.get('id')}")
+        if not q.get("canary") and not q.get("keywords"):
+            errs.append(f"empty keywords on non-canary: {q.get('id')}")
     table, empty = coverage(questions, models)
     if empty:
         errs.append(f"empty gaps: {empty}")
@@ -129,7 +158,8 @@ def check(questions, models):
 #
 # No structural parsing on purpose: entry extraction, heading grouping and
 # link association are the agent's job. We only flatten tags (headings to
-# "## ", list items to "- ", wiki links to [text](->Title)) — a tag-level
+# "## ", list items to "- ", wiki links to "(->Title)" — the first link of
+# each bullet is marked "(=>Title)" as the likely subject) — a tag-level
 # transform with no assumptions about nesting that survives markup changes.
 
 class Flattener(HTMLParser):
@@ -137,15 +167,18 @@ class Flattener(HTMLParser):
         super().__init__()
         self.out = []
         self.skip = 0
-        self.link = None  # pending /wiki/ title for the open <a>
+        self.link = None   # (title, is_subject) for the open <a>
+        self.fresh = True  # no link emitted since the current bullet/heading began
 
     def handle_starttag(self, tag, attrs):
         if tag in ("script", "style", "sup"):
             self.skip += 1
-        elif tag in ("h1", "h2", "h3", "h4"):
-            self.out.append("\n\n## ")
-        elif tag == "li":
-            self.out.append("\n- ")
+        elif tag in ("h1", "h2", "h3", "h4", "li"):
+            if tag == "li":
+                self.out.append("\n- ")
+            else:
+                self.out.append("\n\n## ")
+            self.fresh = True
         elif tag in ("p", "div", "ul", "table", "tr"):
             self.out.append("\n")
         elif tag == "br":
@@ -155,22 +188,22 @@ class Flattener(HTMLParser):
             if href.startswith("/wiki/"):
                 title = urllib.parse.unquote(href[6:].split("#")[0]).replace("_", " ")
                 if not title.startswith(LINK_NS_SKIP):
-                    self.link = title
+                    self.link = (title, self.fresh)
 
     def handle_endtag(self, tag):
         if tag in ("script", "style", "sup"):
             self.skip = max(0, self.skip - 1)
         elif tag == "a" and self.link is not None:
-            self.out.append(" (->" + self.link + ")")
+            title, subject = self.link
+            self.out.append((" (=>" if subject else " (->") + title + ")")
             self.link = None
+            self.fresh = False
         elif tag in ("h1", "h2", "h3", "h4"):
             self.out.append("\n")
 
     def handle_data(self, data):
-        if not self.skip and data.strip():
-            self.out.append(data)
-        elif not self.skip:
-            self.out.append(" ")
+        if not self.skip:
+            self.out.append(data if data.strip() else " ")
 
 
 def flatten(html):
@@ -183,15 +216,37 @@ def flatten(html):
     return text.strip()
 
 
-def collect_titles(html, cap=60):
-    seen, out = set(), []
-    for raw in re.findall(r'href="/wiki/([^"#]+)"', html):
-        t = urllib.parse.unquote(raw).replace("_", " ")
-        if t.startswith(LINK_NS_SKIP) or t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-        if len(out) >= cap:
+def day_titles(flat):
+    """Subject links first (=>), then other links; multi-word before single-word."""
+    subjects = re.findall(r"\(=>([^)]+)\)", flat)
+    others = re.findall(r"\(->([^)]+)\)", flat)
+    seen, ordered = set(), []
+    for group in (subjects, others):
+        group.sort(key=lambda t: -len(t.split()))
+        for t in group:
+            if t not in seen and t not in GENERIC_TITLES:
+                seen.add(t)
+                ordered.append(t)
+    return ordered
+
+
+def allocate_summaries(day_titles_list, max_sources):
+    """Round-robin across days, newest first, so old days can't eat the budget."""
+    queues = [list(ts) for ts in day_titles_list]  # caller passes newest-first
+    picked, out = set(), []
+    while queues and len(out) < max_sources:
+        progressed = False
+        for q in queues[:]:
+            while q:
+                t = q.pop(0)
+                if t not in picked:
+                    picked.add(t)
+                    out.append(t)
+                    progressed = True
+                    break
+            if not q:
+                queues.remove(q)
+        if not progressed:
             break
     return out
 
@@ -206,28 +261,27 @@ def fetch_day(d: date) -> str:
     return data["parse"]["text"]["*"]
 
 
-def fetch_article_summary(title: str):
-    req = urllib.request.Request(REST + urllib.parse.quote(title.replace(" ", "_"), safe=""),
-                                 headers={"User-Agent": UA})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-        return {"title": data.get("title"), "extract": data.get("extract", "")[:600]}
-    except Exception as e:  # noqa: BLE001
-        return {"title": title, "extract": "", "error": repr(e)}
+def fetch_article_summary(title: str, retries: int = 2):
+    err = None
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(
+                REST + urllib.parse.quote(title.replace(" ", "_"), safe=""),
+                headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+            return {"title": data.get("title"), "extract": data.get("extract", "")[:600]}
+        except Exception as e:  # noqa: BLE001
+            err = repr(e)
+            time.sleep(0.5 * (attempt + 1))
+    return {"title": title, "extract": "", "error": err}
 
 
-def parse_day(html):
-    p = DayParser()
-    p.feed(html)
-    return p.entries
-
+# ---------- canaries ----------
 
 def token_set(s):
     return {t.lower() for t in re.findall(r"[a-z]{3,}", s)}
 
-
-# ---------- canaries ----------
 
 def gen_canaries(n, questions, rng):
     bank_tokens = token_set(" ".join(q.get("question", "") + " " + q.get("truth", "") for q in questions))
@@ -288,13 +342,14 @@ def merge(draft_path, bank_path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--context", action="store_true", help="fetch day pages, emit flattened context for the agent")
+    ap.add_argument("--context", action="store_true",
+                    help="fetch day pages, emit flattened context (required for --dates/--since/--thin/--fixture)")
     ap.add_argument("--dates", help="A:B inclusive, ISO")
     ap.add_argument("--since", type=int, metavar="N", help="last N days")
-    ap.add_argument("--thin", action="store_true", help="sample dates in gaps with < THIN items")
+    ap.add_argument("--thin", action="store_true", help="seeded sampling in gaps with < THIN items")
     ap.add_argument("--thin-min", type=int, default=3)
     ap.add_argument("--max-fetch", type=int, default=40)
-    ap.add_argument("--max-sources", type=int, default=25, help="max article summaries fetched per run")
+    ap.add_argument("--max-sources", type=int, default=25, help="article-summary budget per run")
     ap.add_argument("--fixture", help="parse this HTML file instead of fetching (offline test)")
     ap.add_argument("--date", help="day for --fixture, ISO")
     ap.add_argument("--canaries", type=int, metavar="N")
@@ -302,17 +357,18 @@ def main():
     ap.add_argument("--merge", metavar="DRAFT.json")
     ap.add_argument("--bank", default=str(ROOT / "questions.json"))
     ap.add_argument("--models", default=str(ROOT / "models.json"))
-    ap.add_argument("-o", "--out", default="raw-context.md")
+    ap.add_argument("-o", "--out", default=None)
     ap.add_argument("--coverage", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
+    if args.out is None:
+        args.out = "canaries.json" if args.canaries and not args.context else "raw-context.md"
 
     questions = load_json(args.bank)["questions"]
     models = load_json(args.models)["models"]
 
-    if args.coverage or not any([args.context, args.dates, args.since, args.thin, args.fixture,
-                                 args.canaries, args.merge, args.check]):
+    if args.coverage or not any([args.context, args.canaries, args.merge, args.check]):
         table, empty = coverage(questions, models)
         for a, b, n in table:
             print(f"  {a or 'start':>10} -> {b}: {n}")
@@ -331,10 +387,15 @@ def main():
             json.dump(payload, f, ensure_ascii=False, indent=2)
         for c in cans:
             print(f"  canary {c['date']}: {c['question']}")
-        print(f"DRAFTS: 0\nCANARIES: {len(cans)} -> {args.out}")
+        print(f"CANARIES: {len(cans)} -> {args.out}")
         return 0
-    if not args.context and not any([args.dates, args.since, args.thin, args.fixture]):
-        ap.error("nothing to do")
+
+    if not args.context:
+        ap.error("--dates/--since/--thin/--fixture require --context")
+    if not any([args.dates, args.since, args.thin, args.fixture]):
+        ap.error("--context needs --dates / --since / --thin / --fixture")
+
+    cuts = gaps(models)
 
     # date list
     if args.fixture:
@@ -346,58 +407,68 @@ def main():
     elif args.since:
         today = date.today()
         days = [today - timedelta(days=i) for i in range(args.since, -1, -1)]
-    elif args.thin:
+    else:  # --thin: seeded sampling inside under-filled gaps
+        rng = random.Random(args.seed)
         table, _ = coverage(questions, models)
         targets = [(a, b) for a, b, n in table
                    if n < args.thin_min
                    and not (a and (date.fromisoformat(b) - date.fromisoformat(a)).days <= 1)]
+        per_gap = max(3, args.max_fetch // max(1, len(targets)))
         days = []
         for a, b in targets:
             lo = date.fromisoformat(a) if a else min(date.fromisoformat(q["date"])
                                                      for q in questions if not q.get("canary"))
             hi = date.fromisoformat(b)
-            span = max(1, (hi - lo).days)
-            step = max(1, span // max(1, args.max_fetch // max(1, len(targets))))
-            days += [lo + timedelta(days=i) for i in range(0, span + 1, step)]
+            span = [lo + timedelta(days=i) for i in range((hi - lo).days + 1)]
+            days += rng.sample(span, min(len(span), per_gap))
         days = sorted(set(days))[: args.max_fetch]
-    else:
-        ap.error("--context needs --dates / --since / --thin / --fixture")
 
-    sections, titles = [], []
-    for d in days:
+    sections, per_day_titles, fetched = [], [], 0
+    for d in days:  # ascending; summaries are allocated newest-first below
         try:
             html = Path(args.fixture).read_text(encoding="utf-8") if args.fixture else fetch_day(d)
         except Exception as e:  # noqa: BLE001
             print(f"  {d}: fetch failed: {e}", file=sys.stderr)
             continue
-        sections.append(f"# {d.isoformat()}\n\n{flatten(html)}")
-        titles += collect_titles(html)
-        print(f"  {d}: flattened, {len(collect_titles(html))} links")
+        fetched += 1
+        flat = flatten(html)
+        label, note = gap_label(d.isoformat(), cuts)
+        sections.append(f"# {d.isoformat()} — {label}\n({note})\n\n{flat}")
+        per_day_titles.append((d, day_titles(flat)))
+        print(f"  {d}: flattened [{label}], {len(per_day_titles[-1][1])} candidate sources")
 
-    seen, uniq_titles = set(), []
-    for t in titles:
-        if t not in seen:
-            seen.add(t)
-            uniq_titles.append(t)
+    if fetched == 0:
+        print("CONTEXT: 0 days — all fetches failed", file=sys.stderr)
+        return 1
 
-    src_parts = []
-    for t in uniq_titles[: args.max_sources]:
+    # summary budget: newest days first, round-robin across days
+    ordered = allocate_summaries([ts for _, ts in reversed(per_day_titles)], args.max_sources)
+    src_parts, failures = [], 0
+    for t in ordered:
         if args.fixture:
             src_parts.append(f"## {t}\n(summary not fetched: fixture mode)\n")
+            continue
+        s = fetch_article_summary(t)
+        if s.get("error"):
+            failures += 1
+            src_parts.append(f"## {t}\n(FETCH FAILED: {s['error']})\n")
         else:
-            s = fetch_article_summary(t)
             src_parts.append(f"## {t}\n{s.get('extract') or '(no extract)'}\n")
-            time.sleep(0.2)
+        time.sleep(0.2)
 
+    cov_lines = [f"  {a or 'start':>10} -> {b}: {n}" for a, b, n in coverage(questions, models)[0]]
     doc = (
         "<!-- wimgpt bank context: feed to the agent task in tools/agent-task.md -->\n"
-        "# Current-events context\n\n" + "\n\n".join(sections) +
-        "\n\n# Article summaries (for date/事实 cross-checks)\n\n" + "\n".join(src_parts)
+        "# Current-events context\n\n"
+        "# Coverage (drafting priority: thinnest gaps first; never draft from RESERVE)\n"
+        + "\n".join(cov_lines) + "\n\n"
+        + "\n\n".join(sections) +
+        "\n\n# Article summaries (for date cross-checks)\n\n" + "\n".join(src_parts)
     )
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(doc)
-    print(f"CONTEXT: {len(sections)} days -> {args.out}")
-    print(f"SUMMARIES: {min(len(uniq_titles), args.max_sources) if not args.fixture else 0}")
+    print(f"CONTEXT: {fetched} days -> {args.out}")
+    print(f"SUMMARIES: {len(ordered)} (failures: {failures})")
     if args.with_canaries:
         rng = random.Random(args.seed)
         cans = gen_canaries(args.with_canaries, questions, rng)

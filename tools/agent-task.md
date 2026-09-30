@@ -2,20 +2,26 @@
 
 You are maintaining the question bank of `wimgpt` — a tool that identifies
 which LLM is serving a user by probing training-data cutoffs. Input is
-`raw-context.md` (flattened Wikipedia current-events pages; links annotated as
-`(->Article title)`, plus an "Article summaries" section). Turn it into
-`bank-draft.json`.
+`raw-context.md` (flattened Wikipedia current-events pages; each day is headed
+with the cutoff `GAP (...)` it discriminates or `RESERVE`; links annotated as
+`(->Article title)` with the bullet's subject as `(=>Title)`; plus "Article
+summaries" and "Coverage" sections). Turn it into `bank-draft.json`.
 
-Also read `questions.json` first: events already covered by existing questions
-must be skipped (the bank may already contain them under different wording).
+Also read `questions.json` and `models.json` first: skip events already
+covered by existing questions, and respect the gap labels (below).
 
 ## Rules
 
-1. **Extract events** from the dated sections. Ignore categories that make bad
-   quiz items by nature (sports results, ongoing conflicts without a dated
-   development, deaths of people whose death was foreseeable).
+0. **Respect discrimination value.** Each day section is marked with the
+   cutoff gap it discriminates. NEVER draft items from sections marked
+   `RESERVE` — no current candidate knows those events, they add zero
+   information and only waste quiz slots. Prioritize the thinnest gaps
+   listed in the Coverage section.
+1. **Extract events** from the dated sections. Ignore categories that make
+   bad quiz items by nature (sports results, ongoing conflicts without a
+   dated development, deaths of people whose death was foreseeable).
 2. **Verify dates.** Cross-check each event's section date against the
-   "Article summaries" (and the linked article title). If the summary
+   "Article summaries" (and the linked `(=>subject)` article). If the summary
    contradicts the date, use the correct date and say so in `date_check`.
    If you cannot verify, `date_check: "unverified"` — do not guess.
 3. **Judge guessability.** The answer must not be derivable from knowledge
