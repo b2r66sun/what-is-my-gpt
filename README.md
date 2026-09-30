@@ -15,6 +15,22 @@ over candidate models.
 2. Copy the quiz, send it in a fresh ChatGPT chat with search disabled.
 3. Paste the reply, hit Analyze. (Load sample → Analyze for a demo.)
 
+Sampling: each quiz draws N questions per cutoff gap (canaries always
+included); items keep their bank number, so any subset of replies maps back.
+After analysis, "Round-2 quiz" redraws from the gaps around the MAP band for
+a targeted follow-up. The current sample (seed) persists across reloads.
+
+## Bank maintenance
+
+`tools/gen_bank.py` drafts bank items from Wikipedia's current-events day
+pages: fetch → category filter → keyword suggestions → guessability flags →
+band assignment → `bank-draft.json` for review; `--merge` writes reviewed
+items back; `--canaries` fabricates control questions; `--check`/`--coverage`
+validate. The guessability judgment stays human.
+
+CI (`.github/workflows/bank.yml`): `check` runs on push; `draft` runs weekly
+(Mon 03:00 UTC) or manually, opening a PR with fresh drafts and two canaries.
+
 ## How it works
 
 ### Setup

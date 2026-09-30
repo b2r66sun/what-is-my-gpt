@@ -14,6 +14,20 @@
 2. 复制提问，在 ChatGPT 新开对话（关闭联网/搜索）发送
 3. 粘贴回复，点 Analyze（Load sample → Analyze 可看演示）
 
+抽样：每次问卷从每条截止缝隙抽 N 题（金丝雀必含）；题号沿用题库全局
+编号，任意子集的回复都能对回题目。分析后可点「Round-2 quiz」围绕 MAP
+所在带重新抽样做定向加测。当前抽样（seed）跨刷新保留。
+
+## 题库维护
+
+`tools/gen_bank.py` 从 Wikipedia 时事日页起草题库条目：抓取 → 类别过滤 →
+关键词建议 → 可猜性标记 → 按截止带分组 → 生成 `bank-draft.json` 待审；
+`--merge` 写回审核后的条目；`--canaries` 生成虚构控制题；`--check`/
+`--coverage` 校验。可猜性判断保留给人工。
+
+CI（`.github/workflows/bank.yml`）：`check` 在 push 时运行；`draft` 每周一
+03:00 UTC（或手动触发）抓近两周事件并自动开 PR（附两个金丝雀）。
+
 ## 原理
 
 ### 形式化
