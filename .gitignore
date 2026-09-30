@@ -1,0 +1,12 @@
+# python
+__pycache__/
+*.py[cod]
+
+# generated bank working files (CI force-adds raw-context*.md/json to PR branches)
+raw-context.md
+raw-context.canaries.json
+canaries.json
+bank-draft.json
+
+# local
+.DS_Store

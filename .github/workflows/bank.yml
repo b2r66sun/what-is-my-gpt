@@ -63,7 +63,7 @@ jobs:
             gh pr close "$pr" --comment "superseded by a newer bank run"
           done
           git checkout -b "$BR"
-          git add raw-context.md raw-context.canaries.json
+          git add -f raw-context.md raw-context.canaries.json
           git commit -m "bank context $(date -u +%F)"
           git push origin "HEAD:$BR"
           gh pr create --title "Bank context $(date -u +%F)" \
