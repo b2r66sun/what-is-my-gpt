@@ -22,14 +22,19 @@ a targeted follow-up. The current sample (seed) persists across reloads.
 
 ## Bank maintenance
 
-`tools/gen_bank.py` drafts bank items from Wikipedia's current-events day
-pages: fetch → category filter → keyword suggestions → guessability flags →
-band assignment → `bank-draft.json` for review; `--merge` writes reviewed
-items back; `--canaries` fabricates control questions; `--check`/`--coverage`
-validate. The guessability judgment stays human.
+`tools/gen_bank.py` is the deterministic layer: it fetches Wikipedia
+current-events day pages, flattens them (tag-level, no structural parsing)
+into `raw-context.md` with article summaries for date cross-checks. Entry
+extraction, phrasing, keywords and guessability are an agent task
+(`tools/agent-task.md`) — run it with GitHub Agentic Workflows
+([gh-aw](https://github.com/github/gh-aw), consumes Copilot premium requests;
+public-repo Actions compute is free) or any agent CLI. `--merge` writes the
+resulting drafts back; `--canaries` fabricates control questions;
+`--check`/`--coverage` validate.
 
-CI (`.github/workflows/bank.yml`): `check` runs on push; `draft` runs weekly
-(Mon 03:00 UTC) or manually, opening a PR with fresh drafts and two canaries.
+CI (`.github/workflows/bank.yml`): `check` runs on push; `raw` runs weekly
+(Mon 03:00 UTC) or manually, producing the context file plus two canaries in
+a PR — agent slot documented inline.
 
 ## How it works
 

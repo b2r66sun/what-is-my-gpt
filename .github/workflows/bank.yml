@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
       - run: python3 tools/gen_bank.py --check
 
-  draft:
+  raw:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -35,23 +35,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - id: gen
-        run: |
+      - run: |
           SINCE="${{ github.event.inputs.since || '14' }}"
-          python3 tools/gen_bank.py --since "$SINCE" --with-canaries 2 -o bank-draft.json
-          n=$(sed -n 's/^DRAFTS: //p' "$GITHUB_STEP_SUMMARY" 2>/dev/null || true)
-          n=$(python3 -c "import json;print(len(json.load(open('bank-draft.json'))['drafts']))")
-          echo "n=$n" >> "$GITHUB_OUTPUT"
-      - if: steps.gen.outputs.n != '0'
-        run: |
+          python3 tools/gen_bank.py --context --since "$SINCE" --with-canaries 2 -o raw-context.md
+      # ---- agent step (draft generation) ------------------------------------
+      # Deterministic layer only fetches/flattens: question phrasing,
+      # keyword choice and guessability judgment run as an LLM agent task.
+      # Options to execute tools/agent-task.md on this raw-events.json:
+      #   a) GitHub Agentic Workflows (gh-aw): `gh aw init` scaffolds an agent
+      #      workflow; it runs Copilot/Claude/Codex on Actions runners and
+      #      consumes Copilot premium requests (public repos: compute free).
+      #   b) Any agent CLI with a key in secrets (e.g. ANTHROPIC_API_KEY),
+      #      invoked here to read tools/agent-task.md + raw-events.json and
+      #      write bank-draft.json.
+      # Until wired, the PR below carries raw-context.md for manual drafting.
+      - run: |
           git config user.name "bank-bot"
           git config user.email "actions@github.com"
-          BR="bank-draft-$(date -u +%Y%m%d)"
+          BR="bank-ctx-$(date -u +%Y%m%d)"
           git checkout -b "$BR"
-          git add bank-draft.json
-          git commit -m "bank draft $(date -u +%F)"
+          git add raw-context.md raw-context.canaries.json
+          git commit -m "bank context $(date -u +%F)"
           git push origin "HEAD:$BR"
-          gh pr create --title "Bank draft $(date -u +%F)" \
-            --body "Review bank-draft.json: fill question+truth for kept items, drop guessable ones (flags mark suspects), then run python3 tools/gen_bank.py --merge bank-draft.json and push to this branch."
+          gh pr create --title "Bank context $(date -u +%F)" \
+            --body "raw-context.md (flattened current events + article summaries). Run the agent task in tools/agent-task.md (gh-aw or any agent CLI) or draft manually, then: python3 tools/gen_bank.py --merge bank-draft.json"
         env:
           GH_TOKEN: ${{ github.token }}

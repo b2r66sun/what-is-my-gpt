@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""wimgpt bank generator.
+"""wimgpt bank generator (deterministic layer).
 
-Pipeline: Wikipedia current-events day pages -> category-filtered event drafts
--> keyword suggestions + guessability flags -> band assignment against
-models.json -> draft JSON for human review -> merge reviewed drafts into
-questions.json.
-
-The guessability judgment stays human: an answer derivable from pre-event
-knowledge (poll leaders, famous sites, ailing leaders) makes a bad item, and
-no heuristic catches that reliably. CI opens a draft PR; a person fills
-question+truth and drops guessable items before merging.
+Fetches Wikipedia current-events day pages and flattens them (tag-level, no
+structural parsing) into raw-context.md, with article summaries for
+cross-checks. Entry extraction, question phrasing, keyword choice and
+guessability judgment are the agent's job (tools/agent-task.md).
 
 Usage:
   python3 tools/gen_bank.py --coverage                  # gap counts, no network
   python3 tools/gen_bank.py --check                     # validate bank files
-  python3 tools/gen_bank.py --dates 2026-05-01:2026-05-18
-  python3 tools/gen_bank.py --since 10                  # last 10 days
-  python3 tools/gen_bank.py --thin                      # sample dates in gaps < 3 items
-  python3 tools/gen_bank.py --fixture fixture.html --date 2026-05-03   # offline parse test
+  python3 tools/gen_bank.py --context --since 14        # last 14 days -> raw-context.md
+  python3 tools/gen_bank.py --context --dates 2026-05-01:2026-05-18
+  python3 tools/gen_bank.py --context --thin            # sample dates in gaps < 3 items
+  python3 tools/gen_bank.py --context --fixture tools/fixture.html --date 2026-05-03
   python3 tools/gen_bank.py --canaries 3
   python3 tools/gen_bank.py --merge bank-draft.json [--bank questions.json]
 """
@@ -39,21 +34,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 API = "https://en.wikipedia.org/w/api.php"
+REST = "https://en.wikipedia.org/api/rest_v1/page/summary/"
 UA = "wimgpt-bank-gen/0.1 (maintenance script)"
 
-SKIP_CATEGORIES = {"sports", "ongoing", "recent deaths", "deaths", "obituaries"}
-FLAG_PATTERNS = [
-    (r"\belect\w*\b|\bvote|\bwin\w*\b|\bdefeat\w*\b|\bballot", "outcome possibly guessable (favorites/polls)"),
-    (r"\bdied\b|\bdead\b|\bfuneral\b|\bpass(ed)? away", "death: guessable if ailing"),
-    (r"\bfirst\b|\brecord\b|\bunprecedented", "verify uniqueness"),
-    (r"\bannounce\w*\b|\breport\w*\b", "rumor/announcement, not settled fact?"),
-]
-STOPWORDS = set(
-    "The A An On In At Of For To By From With As Is Are Was Were His Her Its Their "
-    "This That These Those After Before During Under Over Between Both Each More "
-    "Most Least New Old Former Later About Following According".split()
-)
-CALENDAR = set(calendar.month_name[1:] + calendar.day_name[:])
+LINK_NS_SKIP = ("Category:", "Portal:", "Special:", "Wikipedia:", "File:", "Help:", "Template:")
 
 CANARY_TEMPLATES = [
     "{country} announced it would permanently leave the {org}",
@@ -66,7 +50,7 @@ CANARY_POOLS = {
     "org": ["International Labour Organization", "Interpol", "World Customs Organization", "International Telecommunication Union"],
     "hazard": ["fire", "flash flood", "gas explosion"],
     "company": ["Arm Holdings", "Ubisoft", "Grab", "Kioxia", "GoTo"],
-    "company2": ["Grammarly", "Figma competitor Canva", "Nuance", "King"],
+    "company2": ["Grammarly", "Canva", "Nuance", "King"],
     "mag": ["5.9", "6.3", "6.8"],
     "region": ["the Azores", "the South Island of New Zealand", "Kamchatka", "the Atlas Mountains"],
     "n": ["300", "700", "1,200"],
@@ -141,51 +125,75 @@ def check(questions, models):
     return 0
 
 
-# ---------- wikipedia fetching & parsing ----------
+# ---------- wikipedia fetching & flattening ----------
+#
+# No structural parsing on purpose: entry extraction, heading grouping and
+# link association are the agent's job. We only flatten tags (headings to
+# "## ", list items to "- ", wiki links to [text](->Title)) — a tag-level
+# transform with no assumptions about nesting that survives markup changes.
 
-class DayParser(HTMLParser):
-    """Collect top-level <li> entries grouped under the nearest h2/h3 heading."""
-
+class Flattener(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.entries = []          # (category, text)
-        self.heading = ""
-        self._h = None
-        self._li_depth = 0
-        self._buf = []
-        self._capture = False
+        self.out = []
+        self.skip = 0
+        self.link = None  # pending /wiki/ title for the open <a>
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("h2", "h3", "h4"):
-            self._h = []
-            self._capture = True
+        if tag in ("script", "style", "sup"):
+            self.skip += 1
+        elif tag in ("h1", "h2", "h3", "h4"):
+            self.out.append("\n\n## ")
         elif tag == "li":
-            self._li_depth += 1
-            if self._li_depth == 1:
-                self._buf = []
-                self._capture = True
-        elif tag in ("ul", "div") and self._li_depth == 0:
-            pass  # structure tolerance: rely on li/h only
+            self.out.append("\n- ")
+        elif tag in ("p", "div", "ul", "table", "tr"):
+            self.out.append("\n")
+        elif tag == "br":
+            self.out.append("\n")
+        elif tag == "a":
+            href = dict(attrs).get("href", "")
+            if href.startswith("/wiki/"):
+                title = urllib.parse.unquote(href[6:].split("#")[0]).replace("_", " ")
+                if not title.startswith(LINK_NS_SKIP):
+                    self.link = title
 
     def handle_endtag(self, tag):
-        if tag in ("h2", "h3", "h4") and self._h is not None:
-            self.heading = " ".join("".join(self._h).split())
-            self._h, self._capture = None, (self._li_depth > 0)
-        elif tag == "li":
-            if self._li_depth == 1 and self._buf is not None:
-                text = re.sub(r"\[\d+\]", "", " ".join("".join(self._buf).split()))
-                if text:
-                    self.entries.append((self.heading, text))
-            self._li_depth -= 1
-            self._capture = self._li_depth > 0
-            self._buf = [] if self._li_depth == 0 else self._buf
+        if tag in ("script", "style", "sup"):
+            self.skip = max(0, self.skip - 1)
+        elif tag == "a" and self.link is not None:
+            self.out.append(" (->" + self.link + ")")
+            self.link = None
+        elif tag in ("h1", "h2", "h3", "h4"):
+            self.out.append("\n")
 
     def handle_data(self, data):
-        if self._capture and (self._h is not None or self._li_depth > 0):
-            if self._h is not None:
-                self._h.append(data)
-            else:
-                self._buf.append(data)
+        if not self.skip and data.strip():
+            self.out.append(data)
+        elif not self.skip:
+            self.out.append(" ")
+
+
+def flatten(html):
+    f = Flattener()
+    f.feed(html)
+    text = "".join(f.out)
+    text = re.sub(r"\[\d+\]", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def collect_titles(html, cap=60):
+    seen, out = set(), []
+    for raw in re.findall(r'href="/wiki/([^"#]+)"', html):
+        t = urllib.parse.unquote(raw).replace("_", " ")
+        if t.startswith(LINK_NS_SKIP) or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= cap:
+            break
+    return out
 
 
 def fetch_day(d: date) -> str:
@@ -198,66 +206,25 @@ def fetch_day(d: date) -> str:
     return data["parse"]["text"]["*"]
 
 
+def fetch_article_summary(title: str):
+    req = urllib.request.Request(REST + urllib.parse.quote(title.replace(" ", "_"), safe=""),
+                                 headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        return {"title": data.get("title"), "extract": data.get("extract", "")[:600]}
+    except Exception as e:  # noqa: BLE001
+        return {"title": title, "extract": "", "error": repr(e)}
+
+
 def parse_day(html):
     p = DayParser()
     p.feed(html)
     return p.entries
 
 
-# ---------- draft generation ----------
-
-def flags_for(text):
-    return [note for pat, note in FLAG_PATTERNS if re.search(pat, text, re.I)]
-
-
-def keywords_draft(text):
-    out = []
-    for m in re.findall(r"\b[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+)*\b", text):
-        words = m.split()
-        if all(w in STOPWORDS or w in CALENDAR for w in words):
-            continue
-        out.append(m)
-    out += re.findall(r"\b\d[\d,\.]*\b", text)
-    seen, uniq = set(), []
-    for k in out:
-        if k not in seen:
-            seen.add(k)
-            uniq.append(k)
-    return uniq[:10]
-
-
 def token_set(s):
     return {t.lower() for t in re.findall(r"[a-z]{3,}", s)}
-
-
-def draft_entries(day_entries, d, models, questions):
-    cuts = gaps(models)
-    bank_text = " ".join(q.get("question", "") + " " + q.get("truth", "") for q in questions)
-    bank_tokens = token_set(bank_text)
-    drafts, skipped = [], {"category": 0, "date": 0, "dupe": 0}
-    for i, (cat, text) in enumerate(day_entries, 1):
-        if any(s in cat.lower() for s in SKIP_CATEGORIES):
-            skipped["category"] += 1
-            continue
-        band = band_of(d.isoformat(), cuts)
-        if band is None:
-            skipped["date"] += 1  # after newest cutoff: nobody knows it
-            continue
-        if len(token_set(text) & bank_tokens) > 0.45 * max(1, len(token_set(text))):
-            skipped["dupe"] += 1
-            continue
-        drafts.append({
-            "id": f"d-{d.isoformat()}-{i:02d}",
-            "date": d.isoformat(),
-            "band": band,
-            "category": cat,
-            "source": text,
-            "keywords_draft": keywords_draft(text),
-            "flags": flags_for(text),
-            "question": "",
-            "truth": "",
-        })
-    return drafts, skipped
 
 
 # ---------- canaries ----------
@@ -282,14 +249,10 @@ def gen_canaries(n, questions, rng):
         out.append({
             "id": f"canary-{d.isoformat()}-{len(out)+1:02d}",
             "date": d.isoformat(),
-            "band": "canary",
-            "category": "fabricated",
-            "source": sent,
-            "keywords_draft": [],
-            "flags": [],
-            "canary": True,
             "question": f"On {d.strftime('%B %-d, %Y')}, {sent}",
             "truth": "Fictional: no such event on that date.",
+            "keywords": [],
+            "canary": True,
         })
     return out
 
@@ -325,20 +288,21 @@ def merge(draft_path, bank_path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--context", action="store_true", help="fetch day pages, emit flattened context for the agent")
     ap.add_argument("--dates", help="A:B inclusive, ISO")
     ap.add_argument("--since", type=int, metavar="N", help="last N days")
     ap.add_argument("--thin", action="store_true", help="sample dates in gaps with < THIN items")
     ap.add_argument("--thin-min", type=int, default=3)
     ap.add_argument("--max-fetch", type=int, default=40)
+    ap.add_argument("--max-sources", type=int, default=25, help="max article summaries fetched per run")
     ap.add_argument("--fixture", help="parse this HTML file instead of fetching (offline test)")
     ap.add_argument("--date", help="day for --fixture, ISO")
     ap.add_argument("--canaries", type=int, metavar="N")
-    ap.add_argument("--with-canaries", type=int, metavar="N",
-                    help="also generate N canaries into the same draft file")
+    ap.add_argument("--with-canaries", type=int, metavar="N", help="also generate N canaries")
     ap.add_argument("--merge", metavar="DRAFT.json")
     ap.add_argument("--bank", default=str(ROOT / "questions.json"))
     ap.add_argument("--models", default=str(ROOT / "models.json"))
-    ap.add_argument("-o", "--out", default="bank-draft.json")
+    ap.add_argument("-o", "--out", default="raw-context.md")
     ap.add_argument("--coverage", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--seed", type=int, default=7)
@@ -347,7 +311,7 @@ def main():
     questions = load_json(args.bank)["questions"]
     models = load_json(args.models)["models"]
 
-    if args.coverage or not any([args.dates, args.since, args.thin, args.fixture,
+    if args.coverage or not any([args.context, args.dates, args.since, args.thin, args.fixture,
                                  args.canaries, args.merge, args.check]):
         table, empty = coverage(questions, models)
         for a, b, n in table:
@@ -369,6 +333,8 @@ def main():
             print(f"  canary {c['date']}: {c['question']}")
         print(f"DRAFTS: 0\nCANARIES: {len(cans)} -> {args.out}")
         return 0
+    if not args.context and not any([args.dates, args.since, args.thin, args.fixture]):
+        ap.error("nothing to do")
 
     # date list
     if args.fixture:
@@ -382,47 +348,63 @@ def main():
         days = [today - timedelta(days=i) for i in range(args.since, -1, -1)]
     elif args.thin:
         table, _ = coverage(questions, models)
-        targets = [(a, b) for a, b, n in table if n < args.thin_min and not (a and (date.fromisoformat(b) - date.fromisoformat(a)).days <= 1)]
+        targets = [(a, b) for a, b, n in table
+                   if n < args.thin_min
+                   and not (a and (date.fromisoformat(b) - date.fromisoformat(a)).days <= 1)]
         days = []
         for a, b in targets:
-            lo = date.fromisoformat(a) if a else min(date.fromisoformat(q["date"]) for q in questions if not q.get("canary"))
+            lo = date.fromisoformat(a) if a else min(date.fromisoformat(q["date"])
+                                                     for q in questions if not q.get("canary"))
             hi = date.fromisoformat(b)
             span = max(1, (hi - lo).days)
             step = max(1, span // max(1, args.max_fetch // max(1, len(targets))))
             days += [lo + timedelta(days=i) for i in range(0, span + 1, step)]
         days = sorted(set(days))[: args.max_fetch]
     else:
-        ap.error("nothing to do")
+        ap.error("--context needs --dates / --since / --thin / --fixture")
 
-    all_drafts, total_skipped = [], {"category": 0, "date": 0, "dupe": 0}
+    sections, titles = [], []
     for d in days:
         try:
             html = Path(args.fixture).read_text(encoding="utf-8") if args.fixture else fetch_day(d)
         except Exception as e:  # noqa: BLE001
             print(f"  {d}: fetch failed: {e}", file=sys.stderr)
             continue
-        ds, skipped = draft_entries(parse_day(html), d, models, questions)
-        all_drafts += ds
-        for k in total_skipped:
-            total_skipped[k] += skipped[k]
-        print(f"  {d}: {len(ds)} drafts (skipped {skipped})")
+        sections.append(f"# {d.isoformat()}\n\n{flatten(html)}")
+        titles += collect_titles(html)
+        print(f"  {d}: flattened, {len(collect_titles(html))} links")
 
-    payload = {
-        "generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "skipped": total_skipped,
-        "drafts": all_drafts,
-        "canaries": [],
-        "instructions": "Fill question+truth for kept items (keywords = grading fallback), "
-                        "delete guessable ones, optionally add canaries, then: "
-                        "python3 tools/gen_bank.py --merge bank-draft.json",
-    }
+    seen, uniq_titles = set(), []
+    for t in titles:
+        if t not in seen:
+            seen.add(t)
+            uniq_titles.append(t)
+
+    src_parts = []
+    for t in uniq_titles[: args.max_sources]:
+        if args.fixture:
+            src_parts.append(f"## {t}\n(summary not fetched: fixture mode)\n")
+        else:
+            s = fetch_article_summary(t)
+            src_parts.append(f"## {t}\n{s.get('extract') or '(no extract)'}\n")
+            time.sleep(0.2)
+
+    doc = (
+        "<!-- wimgpt bank context: feed to the agent task in tools/agent-task.md -->\n"
+        "# Current-events context\n\n" + "\n\n".join(sections) +
+        "\n\n# Article summaries (for date/事实 cross-checks)\n\n" + "\n".join(src_parts)
+    )
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(doc)
+    print(f"CONTEXT: {len(sections)} days -> {args.out}")
+    print(f"SUMMARIES: {min(len(uniq_titles), args.max_sources) if not args.fixture else 0}")
     if args.with_canaries:
         rng = random.Random(args.seed)
-        payload["canaries"] = gen_canaries(args.with_canaries, questions, rng)
-        print(f"CANARIES: {len(payload['canaries'])}")
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"DRAFTS: {len(all_drafts)} -> {args.out}")
+        cans = gen_canaries(args.with_canaries, questions, rng)
+        cf = Path(args.out).with_suffix(".canaries.json")
+        with open(cf, "w", encoding="utf-8") as f:
+            json.dump({"canaries": cans}, f, ensure_ascii=False, indent=2)
+        print(f"CANARIES: {len(cans)} -> {cf}")
     return 0
 
 

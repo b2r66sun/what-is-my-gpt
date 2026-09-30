@@ -20,13 +20,17 @@
 
 ## 题库维护
 
-`tools/gen_bank.py` 从 Wikipedia 时事日页起草题库条目：抓取 → 类别过滤 →
-关键词建议 → 可猜性标记 → 按截止带分组 → 生成 `bank-draft.json` 待审；
-`--merge` 写回审核后的条目；`--canaries` 生成虚构控制题；`--check`/
-`--coverage` 校验。可猜性判断保留给人工。
+`tools/gen_bank.py` 是确定性层：抓取 Wikipedia 时事日页并做**无结构
+假设的压平**（标签级转换），连同文章摘要生成 `raw-context.md` 供日期
+交叉核对。条目提取、措辞、关键词和可猜性判断是 agent 任务
+（`tools/agent-task.md`）——用 GitHub Agentic Workflows（[gh-aw](https://github.com/github/gh-aw)，
+消耗 Copilot premium requests，公开仓库 Actions 计算免费）或任意 agent
+CLI 执行。`--merge` 写回产出；`--canaries` 生成虚构控制题；
+`--check`/`--coverage` 校验。
 
-CI（`.github/workflows/bank.yml`）：`check` 在 push 时运行；`draft` 每周一
-03:00 UTC（或手动触发）抓近两周事件并自动开 PR（附两个金丝雀）。
+CI（`.github/workflows/bank.yml`）：`check` 在 push 时运行；`raw` 每周一
+03:00 UTC（或手动触发）生成上下文文件并附两个金丝雀开 PR——agent
+执行位在 workflow 内注释说明。
 
 ## 原理
 
