@@ -158,8 +158,8 @@ def check(questions, models):
 #
 # No structural parsing on purpose: entry extraction, heading grouping and
 # link association are the agent's job. We only flatten tags (headings to
-# "## ", list items to "- ", wiki links to "(->Title)" — the first link of
-# each bullet is marked "(=>Title)" as the likely subject) — a tag-level
+# "## ", list items to "- ", wiki links to "(->[Title])" — the first link of
+# each bullet is marked "(=>[Title])" as the likely subject) — a tag-level
 # transform with no assumptions about nesting that survives markup changes.
 
 class Flattener(HTMLParser):
@@ -195,7 +195,9 @@ class Flattener(HTMLParser):
             self.skip = max(0, self.skip - 1)
         elif tag == "a" and self.link is not None:
             title, subject = self.link
-            self.out.append((" (=>" if subject else " (->") + title + ")")
+            # brackets: Wikipedia titles never contain [ ], but often contain
+            # parentheses (disambiguation) — so [Title] is unambiguous to parse
+            self.out.append((" (=>[" if subject else " (->[") + title + "])")
             self.link = None
             self.fresh = False
         elif tag in ("h1", "h2", "h3", "h4"):
@@ -218,8 +220,8 @@ def flatten(html):
 
 def day_titles(flat):
     """Subject links first (=>), then other links; multi-word before single-word."""
-    subjects = re.findall(r"\(=>([^)]+)\)", flat)
-    others = re.findall(r"\(->([^)]+)\)", flat)
+    subjects = re.findall(r"\(=>\[([^\]]+)\]\)", flat)
+    others = re.findall(r"\(->\[([^\]]+)\]\)", flat)
     seen, ordered = set(), []
     for group in (subjects, others):
         group.sort(key=lambda t: -len(t.split()))
@@ -237,6 +239,8 @@ def allocate_summaries(day_titles_list, max_sources):
     while queues and len(out) < max_sources:
         progressed = False
         for q in queues[:]:
+            if len(out) >= max_sources:
+                break
             while q:
                 t = q.pop(0)
                 if t not in picked:

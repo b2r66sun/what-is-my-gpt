@@ -4,7 +4,7 @@ You are maintaining the question bank of `wimgpt` — a tool that identifies
 which LLM is serving a user by probing training-data cutoffs. Input is
 `raw-context.md` (flattened Wikipedia current-events pages; each day is headed
 with the cutoff `GAP (...)` it discriminates or `RESERVE`; links annotated as
-`(->Article title)` with the bullet's subject as `(=>Title)`; plus "Article
+`(->[Article title])` with the bullet's subject as `(=>[Title])`; plus "Article
 summaries" and "Coverage" sections). Turn it into `bank-draft.json`.
 
 Also read `questions.json` and `models.json` first: skip events already
@@ -21,7 +21,7 @@ covered by existing questions, and respect the gap labels (below).
    bad quiz items by nature (sports results, ongoing conflicts without a
    dated development, deaths of people whose death was foreseeable).
 2. **Verify dates.** Cross-check each event's section date against the
-   "Article summaries" (and the linked `(=>subject)` article). If the summary
+   "Article summaries" (and the linked `(=>[subject])` article). If the summary
    contradicts the date, use the correct date and say so in `date_check`.
    If you cannot verify, `date_check: "unverified"` — do not guess.
 3. **Judge guessability.** The answer must not be derivable from knowledge
